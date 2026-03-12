@@ -1,0 +1,37 @@
+# Drop this file into any repo at .github/workflows/vigil.yml
+# to auto-review PRs with Vigil.
+#
+# Required secrets:
+#   GEMINI_API_KEY  — if using gemini/* models (default)
+#   ANTHROPIC_API_KEY — if using claude-* models
+#   OPENAI_API_KEY — if using openai/* models
+#
+# The built-in GITHUB_TOKEN is used for posting reviews.
+# Since it's a bot account, it CAN approve/request_changes (not your own PR).
+
+name: Vigil PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# Cancel in-progress reviews when a new commit is pushed
+concurrency:
+  group: vigil-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    # Skip drafts and bot PRs
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.actor != 'dependabot[bot]'
+    steps:
+      - uses: F2iProject/vigil@main
+        with:
+          model: "gemini/gemini-2.5-flash"
+          gemini-api-key: ${{ secrets.GEMINI_API_KEY }}

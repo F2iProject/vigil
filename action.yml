@@ -1,0 +1,61 @@
+name: "Vigil PR Review"
+description: "AI-powered, model-agnostic PR review with multi-persona specialists and inline comments"
+author: "F2iProject"
+
+inputs:
+  model:
+    description: "LLM model for specialists (litellm format, e.g. gemini/gemini-2.5-flash)"
+    required: false
+    default: "gemini/gemini-2.5-flash"
+  lead-model:
+    description: "LLM model for lead reviewer (defaults to --model value)"
+    required: false
+    default: ""
+  profile:
+    description: "Review profile: default, enterprise"
+    required: false
+    default: "default"
+  github-token:
+    description: "GitHub token for posting reviews (defaults to GITHUB_TOKEN)"
+    required: false
+    default: ${{ github.token }}
+  gemini-api-key:
+    description: "Gemini API key (required if using gemini/* models)"
+    required: false
+  openai-api-key:
+    description: "OpenAI API key (required if using openai/* models)"
+    required: false
+  anthropic-api-key:
+    description: "Anthropic API key (required if using claude-* models)"
+    required: false
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install Vigil
+      shell: bash
+      run: pip install "${{ github.action_path }}"
+
+    - name: Run review
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        GEMINI_API_KEY: ${{ inputs.gemini-api-key }}
+        OPENAI_API_KEY: ${{ inputs.openai-api-key }}
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+      run: |
+        ARGS=(
+          "${{ github.event.pull_request.html_url }}"
+          --model "${{ inputs.model }}"
+          --profile "${{ inputs.profile }}"
+          --post
+        )
+        if [ -n "${{ inputs.lead-model }}" ]; then
+          ARGS+=(--lead-model "${{ inputs.lead-model }}")
+        fi
+        vigil review "${ARGS[@]}"
