@@ -2,6 +2,10 @@ name: "Vigil PR Review"
 description: "AI-powered, model-agnostic PR review with multi-persona specialists and inline comments"
 author: "F2iProject"
 
+branding:
+  icon: "eye"
+  color: "purple"
+
 inputs:
   model:
     description: "LLM model for specialists (litellm format, e.g. gemini/gemini-2.5-flash)"
