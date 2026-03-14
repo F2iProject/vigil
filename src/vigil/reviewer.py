@@ -7,6 +7,7 @@ from typing import Callable
 
 from litellm import completion
 
+from .alerts import send_alerts_for_verdicts
 from .diff_parser import diff_summary, filter_hunks, parse_diff, reassemble_diff
 from .models import Finding, PersonaVerdict, ReviewResult, Severity
 from .personas import Persona, ReviewProfile
@@ -252,6 +253,13 @@ def review_diff(
 
         try:
             verdict = _run_specialist(persona, pr_block, model)
+
+            # Non-blocking personas: move findings to observations, force APPROVE
+            if not persona.blocking and verdict.findings:
+                verdict.observations = verdict.findings + verdict.observations
+                verdict.findings = []
+                verdict.decision = "APPROVE"
+
             verdicts.append(verdict)
             if on_specialist_done:
                 on_specialist_done(verdict)
@@ -273,6 +281,21 @@ def review_diff(
                     observations=[],
                 )
             )
+
+    # --- Step 1.5: Send email alerts for alert-enabled personas ---
+    alert_personas = {p.name for p in profile.specialists if p.alert}
+    if alert_personas:
+        try:
+            sent = send_alerts_for_verdicts(
+                verdicts, alert_personas,
+                pr_url=pr_context.get("url", ""),
+                pr_title=pr_context.get("title", ""),
+            )
+            if sent:
+                import logging
+                logging.getLogger(__name__).info("Sent %d alert email(s)", sent)
+        except Exception:
+            pass  # alerting is best-effort, never blocks the review
 
     # --- Step 2: Lead review (gets file summary + specialist verdicts, not full diff) ---
     lead_pr_block = _build_pr_context_block(diff, pr_context, full_summary)

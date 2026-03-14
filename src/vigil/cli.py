@@ -11,7 +11,7 @@ from rich.table import Table
 
 from .audit import write_audit_entry
 from .comment_manager import (
-    fetch_vigil_comments,
+    fetch_all_vigil_comments,
     get_last_reviewed_sha,
     resolve_addressed_threads,
     resolve_dismissed_threads,
@@ -180,11 +180,11 @@ def review(
             console.print(f"[dim yellow]Incremental diff failed (force-push?), falling back to full review: {e}[/dim yellow]")
             review_diff_text = pr_data["diff"]
 
-        # Fetch existing comments for deduplication
+        # Fetch existing comments for deduplication (includes resolved threads)
         try:
-            existing_comments = fetch_vigil_comments(owner, repo, pr_number, token)
+            existing_comments = fetch_all_vigil_comments(owner, repo, pr_number, token)
             if existing_comments:
-                console.print(f"[dim]{len(existing_comments)} existing Vigil comment(s) for dedup[/dim]")
+                console.print(f"[dim]{len(existing_comments)} existing Vigil comment(s) for dedup (incl. resolved)[/dim]")
         except Exception as e:
             console.print(f"[dim yellow]Could not fetch existing comments: {e}[/dim yellow]")
 
@@ -288,6 +288,49 @@ def dismiss_resolved(
     owner, repo, pr_number = parse_pr_url(pr_url)
     count = resolve_dismissed_threads(owner, repo, pr_number, token)
     console.print(f"[dim]Resolved {count} dismissed thread(s)[/dim]")
+
+
+@app.command()
+def serve(
+    port: int = typer.Option(8000, "--port", "-p", help="Port to listen on"),
+    host: str = typer.Option("0.0.0.0", "--host", help="Host to bind to"),
+    model: str = typer.Option("gemini/gemini-2.5-flash", "--model", "-m", help="LLM model for specialists"),
+    lead_model: str = typer.Option(None, "--lead-model", help="LLM model for lead reviewer"),
+    profile: str = typer.Option("default", "--profile", help="Review profile"),
+):
+    """Start the Vigil webhook server to receive GitHub events."""
+    try:
+        import uvicorn
+    except ImportError:
+        console.print("[red]Error:[/red] uvicorn is required. Install with: pip install 'vigil[webhook]'")
+        raise typer.Exit(1)
+
+    token = os.environ.get("GITHUB_TOKEN")
+    if not token:
+        console.print("[red]Error:[/red] Set GITHUB_TOKEN environment variable.")
+        raise typer.Exit(1)
+
+    webhook_secret = os.environ.get("WEBHOOK_SECRET")
+    if not webhook_secret:
+        console.print("[yellow]Warning:[/yellow] WEBHOOK_SECRET not set — signature verification disabled!")
+        console.print("[dim]Set WEBHOOK_SECRET to match your GitHub webhook configuration.[/dim]")
+
+    from .webhook import create_app
+
+    webhook_app = create_app(
+        webhook_secret=webhook_secret,
+        model=model,
+        lead_model=lead_model,
+        profile=profile,
+    )
+
+    console.print(f"[bold green]Vigil webhook server starting[/bold green]")
+    console.print(f"[dim]Listening on {host}:{port}[/dim]")
+    console.print(f"[dim]Model: {model} | Profile: {profile}[/dim]")
+    console.print(f"[dim]Webhook URL: http://{host}:{port}/webhook[/dim]")
+    console.print(f"[dim]Health check: http://{host}:{port}/health[/dim]\n")
+
+    uvicorn.run(webhook_app, host=host, port=port, log_level="info")
 
 
 @app.command()

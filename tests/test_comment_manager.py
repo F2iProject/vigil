@@ -4,7 +4,10 @@ import pytest
 
 from vigil.comment_manager import (
     _content_fingerprint,
+    _extract_issue_refs,
     _extract_message_content,
+    _is_resolution_reply,
+    _issue_covers_finding,
     deduplicate_comments,
     is_duplicate_finding,
     resolve_threads_batch,
@@ -233,6 +236,133 @@ class TestVigilSessionPattern:
         match = VIGIL_SESSION_PATTERN.search("blah VGL-f0f0f0 blah")
         assert match is not None
         assert match.group(0) == "VGL-f0f0f0"
+
+
+# ---------- _is_resolution_reply ----------
+
+class TestIsResolutionReply:
+
+    def test_resolved(self):
+        assert _is_resolution_reply("resolved") is True
+
+    def test_resolve(self):
+        assert _is_resolution_reply("resolve") is True
+
+    def test_fixed(self):
+        assert _is_resolution_reply("fixed") is True
+
+    def test_fix(self):
+        assert _is_resolution_reply("fix") is True
+
+    def test_addressed(self):
+        assert _is_resolution_reply("addressed") is True
+
+    def test_done(self):
+        assert _is_resolution_reply("done") is True
+
+    def test_resolved_with_issue_link(self):
+        assert _is_resolution_reply("Resolved — see #45") is True
+
+    def test_resolved_with_full_url(self):
+        assert _is_resolution_reply("Fixed in https://github.com/org/repo/issues/123") is True
+
+    def test_bare_issue_ref(self):
+        assert _is_resolution_reply("#42") is True
+
+    def test_bare_full_url(self):
+        assert _is_resolution_reply("https://github.com/org/repo/issues/99") is True
+
+    def test_random_text_not_resolution(self):
+        assert _is_resolution_reply("This looks great!") is False
+
+    def test_empty_string(self):
+        assert _is_resolution_reply("") is False
+
+    def test_whitespace_only(self):
+        assert _is_resolution_reply("   ") is False
+
+    def test_case_insensitive(self):
+        assert _is_resolution_reply("RESOLVED") is True
+        assert _is_resolution_reply("Fixed") is True
+
+    def test_partial_keyword_not_matched(self):
+        # "resolver" should not match (the regex uses \b word boundary)
+        assert _is_resolution_reply("resolver pattern") is False
+
+
+# ---------- _extract_issue_refs ----------
+
+class TestExtractIssueRefs:
+
+    def test_full_url(self):
+        refs = _extract_issue_refs("See https://github.com/org/repo/issues/42")
+        assert len(refs) == 1
+        assert refs[0] == ("org", "repo", 42)
+
+    def test_short_ref(self):
+        refs = _extract_issue_refs("Fixed in #123")
+        assert len(refs) == 1
+        assert refs[0] == (None, None, 123)
+
+    def test_multiple_refs(self):
+        refs = _extract_issue_refs("Addresses #10 and #20")
+        assert len(refs) == 2
+        nums = {r[2] for r in refs}
+        assert nums == {10, 20}
+
+    def test_no_refs(self):
+        refs = _extract_issue_refs("Just a normal comment")
+        assert refs == []
+
+    def test_mixed_full_and_short(self):
+        refs = _extract_issue_refs("See https://github.com/a/b/issues/1 and also #2")
+        assert len(refs) == 2
+
+
+# ---------- _issue_covers_finding ----------
+
+class TestIssueCoverseFinding:
+
+    def test_relevant_issue(self):
+        issue = {
+            "title": "Fix SQL injection vulnerability in auth module",
+            "body": "The query builder uses string concatenation instead of parameterized queries.",
+        }
+        finding = "SQL injection vulnerability: the query uses string concatenation"
+        assert _issue_covers_finding(issue, finding) is True
+
+    def test_irrelevant_issue(self):
+        issue = {
+            "title": "Update README formatting",
+            "body": "Fix markdown headers and add badges.",
+        }
+        finding = "SQL injection vulnerability in the database query layer"
+        assert _issue_covers_finding(issue, finding) is False
+
+    def test_empty_finding_matches_any(self):
+        issue = {"title": "Something", "body": "Something else"}
+        assert _issue_covers_finding(issue, "") is True
+
+    def test_empty_issue_body(self):
+        issue = {"title": "", "body": None}
+        finding = "Some important finding"
+        assert _issue_covers_finding(issue, finding) is False
+
+    def test_partial_keyword_overlap(self):
+        issue = {
+            "title": "Add input validation for user registration",
+            "body": "Validate email format and password strength.",
+        }
+        finding = "Missing input validation on user registration form"
+        assert _issue_covers_finding(issue, finding) is True
+
+    def test_completely_unrelated(self):
+        issue = {
+            "title": "Fix CI pipeline timeout",
+            "body": "Increase the timeout from 10 to 30 minutes for large test suites.",
+        }
+        finding = "Race condition in concurrent counter access without mutex"
+        assert _issue_covers_finding(issue, finding) is False
 
 
 # ---------- resolve_threads_batch (unit-level, no network) ----------

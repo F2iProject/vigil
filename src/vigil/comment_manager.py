@@ -27,6 +27,129 @@ _STRIP_PATTERNS = [
 # Max thread IDs per batch mutation (GitHub GraphQL has a ~500KB payload limit)
 _BATCH_SIZE = 50
 
+# Patterns that indicate a reply is resolving a Vigil comment
+_RESOLUTION_KEYWORDS = re.compile(
+    r"^(?:resolved?|fix(?:ed)?|addressed|done)\b",
+    re.IGNORECASE,
+)
+_ISSUE_LINK_PATTERN = re.compile(
+    r"(?:https://github\.com/([^/]+)/([^/]+)/issues/(\d+))"
+)
+_SHORT_ISSUE_REF = re.compile(r"#(\d+)")
+
+# Minimum similarity between a Vigil finding and an issue for auto-resolution
+_ISSUE_RELEVANCE_THRESHOLD = 0.25
+
+
+def _extract_issue_refs(body: str) -> list[tuple[str | None, str | None, int]]:
+    """Extract issue references from a reply body.
+
+    Returns list of (owner, repo, issue_number) tuples.
+    For short refs like #45, owner and repo are None (same repo).
+    """
+    refs: list[tuple[str | None, str | None, int]] = []
+    # Full URLs: https://github.com/owner/repo/issues/123
+    full_url_spans: list[tuple[int, int]] = []
+    for match in _ISSUE_LINK_PATTERN.finditer(body):
+        refs.append((match.group(1), match.group(2), int(match.group(3))))
+        full_url_spans.append((match.start(), match.end()))
+    # Short refs: #123 (only if not inside a full URL span)
+    for match in _SHORT_ISSUE_REF.finditer(body):
+        pos = match.start()
+        inside_url = any(start <= pos < end for start, end in full_url_spans)
+        if not inside_url:
+            refs.append((None, None, int(match.group(1))))
+    return refs
+
+
+def _fetch_issue(owner: str, repo: str, issue_number: int, token: str) -> dict | None:
+    """Fetch a GitHub issue by number. Returns None on failure."""
+    url = f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}"
+    try:
+        resp = httpx.get(
+            url,
+            headers={
+                "Accept": "application/vnd.github.v3+json",
+                "Authorization": f"Bearer {token}",
+            },
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception as e:
+        log.warning("Failed to fetch issue %s/%s#%d: %s", owner, repo, issue_number, e)
+    return None
+
+
+def _issue_covers_finding(issue: dict, finding_body: str) -> bool:
+    """Check if a GitHub issue's content is relevant to a Vigil finding.
+
+    Uses keyword overlap: extracts meaningful words from the finding,
+    then checks what fraction appear in the issue title + body.
+    This is a lightweight semantic check — not LLM-level, but catches
+    cases like "SQL injection" finding → issue titled "Fix SQL injection in auth module".
+    """
+    finding_text = _extract_message_content(finding_body)
+    if not finding_text:
+        return True  # empty finding, any issue counts
+
+    issue_text = (
+        (issue.get("title", "") + " " + (issue.get("body") or ""))
+        .lower()
+        .strip()
+    )
+    if not issue_text:
+        return False
+
+    # Tokenize finding into meaningful words (skip short/common ones)
+    stop_words = {"the", "a", "an", "is", "are", "was", "were", "be", "been",
+                  "has", "have", "had", "do", "does", "did", "will", "would",
+                  "could", "should", "may", "might", "can", "this", "that",
+                  "with", "from", "for", "not", "but", "and", "or", "in",
+                  "on", "at", "to", "of", "it", "its", "by", "as", "if",
+                  "into", "than", "then", "no", "nor", "so", "too", "very",
+                  "just", "about", "also", "each", "which", "their", "there",
+                  "when", "where", "how", "all", "any", "both", "few", "more",
+                  "most", "other", "some", "such", "only", "own", "same",
+                  "being", "use", "used", "using"}
+    finding_words = [w for w in re.findall(r"[a-z]{3,}", finding_text) if w not in stop_words]
+
+    if not finding_words:
+        return True  # no meaningful words to check
+
+    # Check what fraction of finding keywords appear in the issue
+    matches = sum(1 for w in finding_words if w in issue_text)
+    ratio = matches / len(finding_words)
+
+    log.debug(
+        "Issue relevance: %.2f (%d/%d keywords matched)",
+        ratio, matches, len(finding_words),
+    )
+    return ratio >= _ISSUE_RELEVANCE_THRESHOLD
+
+
+def _is_resolution_reply(body: str) -> bool:
+    """Check if a reply body indicates the finding is resolved.
+
+    Matches:
+    - "resolved", "resolve", "fixed", "fix", "addressed", "done"
+    - Any of the above followed by extra text (e.g. "resolved — see #45")
+    - A bare issue/PR link like "#45" or "https://github.com/org/repo/issues/45"
+    - Combinations like "Resolved in #123"
+    """
+    text = body.strip().lower()
+    if not text:
+        return False
+    # Direct keyword match (possibly followed by other text like links/notes)
+    if _RESOLUTION_KEYWORDS.match(text):
+        return True
+    # Bare issue/PR link (the reply is just a link to a fix)
+    if _SHORT_ISSUE_REF.fullmatch(text.strip()):
+        return True
+    if _ISSUE_LINK_PATTERN.fullmatch(text.strip()):
+        return True
+    return False
+
 
 def _github_headers(token: str) -> dict[str, str]:
     return {
@@ -241,11 +364,16 @@ def resolve_addressed_threads(
 def resolve_dismissed_threads(
     owner: str, repo: str, pr_number: int, token: str,
 ) -> int:
-    """Resolve Vigil threads that received a 'resolved' reply.
+    """Resolve Vigil threads that received a resolution reply.
 
     Scans all PR review comments. For each Vigil inline comment thread,
-    checks if any reply contains 'resolved' (case-insensitive).
-    If so, resolves the thread via GraphQL.
+    checks if any reply indicates the finding is resolved:
+    - Keywords: "resolved", "fixed", "addressed", "done"
+    - Issue links: "#45" or full GitHub URLs — verified to cover the concern
+
+    When a reply contains an issue link, Vigil fetches the issue and checks
+    that it's relevant to the finding (keyword overlap). This prevents agents
+    from dismissing findings by linking unrelated issues.
 
     Returns count of resolved threads.
     """
@@ -267,16 +395,47 @@ def resolve_dismissed_threads(
         if parent_id and parent_id in vigil_roots:
             replies_to.setdefault(parent_id, []).append(c)
 
-    # Check which Vigil root comments have "resolved" replies
+    # Check which Vigil root comments have valid resolution replies
     # Track by (path, line, session_id) for robust matching to GraphQL threads
-    roots_to_resolve: list[dict] = []  # root comment dicts
+    roots_to_resolve: list[dict] = []
     for root_id in vigil_roots:
         replies = replies_to.get(root_id, [])
+        root_comment = by_id[root_id]
+        finding_body = root_comment.get("body", "")
+
         for reply in replies:
-            body = reply.get("body", "").strip().lower()
-            if body == "resolved" or body == "resolve":
-                roots_to_resolve.append(by_id[root_id])
-                break
+            reply_body = reply.get("body", "").strip()
+            if not _is_resolution_reply(reply_body.lower()):
+                continue
+
+            # Check if reply contains issue links that need verification
+            issue_refs = _extract_issue_refs(reply_body)
+            if issue_refs:
+                # Verify at least one linked issue covers the concern
+                verified = False
+                for ref_owner, ref_repo, issue_num in issue_refs:
+                    # Use PR's owner/repo for short refs like #45
+                    eff_owner = ref_owner or owner
+                    eff_repo = ref_repo or repo
+                    issue = _fetch_issue(eff_owner, eff_repo, issue_num, token)
+                    if issue and _issue_covers_finding(issue, finding_body):
+                        log.info(
+                            "Issue %s/%s#%d covers finding — accepting resolution",
+                            eff_owner, eff_repo, issue_num,
+                        )
+                        verified = True
+                        break
+                    elif issue:
+                        log.info(
+                            "Issue %s/%s#%d does NOT cover finding — skipping",
+                            eff_owner, eff_repo, issue_num,
+                        )
+                if not verified:
+                    continue  # issue doesn't cover the finding, skip
+            # else: pure keyword resolution (human said "resolved"), trust it
+
+            roots_to_resolve.append(root_comment)
+            break
 
     if not roots_to_resolve:
         return 0
@@ -314,6 +473,45 @@ def resolve_dismissed_threads(
     for tid in resolved:
         log.info("Resolved dismissed thread %s", tid)
     return len(resolved)
+
+
+def fetch_all_vigil_comments(
+    owner: str, repo: str, pr_number: int, token: str,
+) -> list[dict]:
+    """Fetch ALL Vigil comments including those in resolved threads.
+
+    Combines REST API comments (active) with GraphQL thread comments (resolved).
+    This ensures deduplication catches findings that were previously posted
+    even if their threads were resolved by a user or agent.
+    """
+    # Get active comments via REST (fast, includes path/line/body)
+    active = fetch_vigil_comments(owner, repo, pr_number, token)
+    active_bodies = {c.get("body", "") for c in active}
+
+    # Get all threads (including resolved) via GraphQL
+    threads = fetch_review_threads(owner, repo, pr_number, token)
+
+    # Add resolved Vigil thread comments that aren't already in active set
+    resolved_extras: list[dict] = []
+    for t in threads:
+        if not t["isResolved"]:
+            continue  # already covered by REST API
+        if not VIGIL_SESSION_PATTERN.search(t.get("body", "")):
+            continue  # not a Vigil comment
+        # Build a comment-like dict for dedup comparison
+        comment = {
+            "path": t.get("path"),
+            "line": t.get("line"),
+            "body": t.get("body", ""),
+        }
+        if comment["body"] not in active_bodies:
+            resolved_extras.append(comment)
+
+    log.debug(
+        "Vigil comments: %d active + %d from resolved threads",
+        len(active), len(resolved_extras),
+    )
+    return active + resolved_extras
 
 
 def _extract_message_content(body: str) -> str:
