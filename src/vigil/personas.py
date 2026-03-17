@@ -31,6 +31,13 @@ Rules:
 - Only return REQUEST_CHANGES if there are high or critical severity findings.
 - Be specific: file paths, line numbers, concrete suggestions.
 
+CHANGED LINES ONLY — THIS IS CRITICAL:
+- You are reviewing a DIFF. Only flag issues on lines that were ADDED or MODIFIED
+  (lines starting with + in the diff). These are the lines the author wrote in this PR.
+- Do NOT flag issues on context lines (unchanged lines shown for surrounding context).
+  Those lines existed before this PR and are not the author's responsibility here.
+- If unchanged code has a problem, it is OUT OF SCOPE for THIS review.
+
 SIGNAL-TO-NOISE — THIS IS CRITICAL:
 - Your job is to catch REAL problems, not to prove you read the code.
 - If this domain looks clean, return APPROVE with EMPTY findings and observations.

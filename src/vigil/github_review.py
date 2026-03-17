@@ -1,13 +1,15 @@
 """Post review results as GitHub PR review comments with inline annotations."""
 
+import difflib
 import logging
+from collections import defaultdict
 
 import httpx
 
 from .comment_manager import deduplicate_comments
 from .diff_parser import commentable_lines, find_best_file_for_finding, nearest_commentable_line
 from .models import Finding, PersonaVerdict, ReviewResult, Severity
-from .utils import github_headers, severity_emoji
+from .utils import extract_message_content, github_headers, severity_emoji
 
 log = logging.getLogger(__name__)
 
@@ -192,6 +194,88 @@ def _place_finding_inline(
     return {"path": path, "line": line, "side": "RIGHT", "body": body}
 
 
+def _group_similar_inline_comments(
+    comments: list[dict],
+    similarity_threshold: float = 0.85,
+) -> list[dict]:
+    """Group inline comments with near-identical messages across different locations.
+
+    When the same finding (e.g. "redundant db.commit()") appears at N locations,
+    post ONE representative comment and append a summary of the other locations.
+    This prevents review spam where 20+ identical comments flood the PR.
+
+    Returns a deduplicated list of inline comment dicts.
+    """
+    if len(comments) <= 1:
+        return list(comments)
+
+    # Extract normalized message text for each comment
+    texts = [extract_message_content(c.get("body", "")) for c in comments]
+
+    # Group by message similarity — union-find style
+    # group_id[i] = canonical index for comment i
+    group_id = list(range(len(comments)))
+
+    def find(i: int) -> int:
+        while group_id[i] != i:
+            group_id[i] = group_id[group_id[i]]
+            i = group_id[i]
+        return i
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            group_id[rb] = ra
+
+    for i in range(len(comments)):
+        if not texts[i]:
+            continue
+        for j in range(i + 1, len(comments)):
+            if not texts[j]:
+                continue
+            # Skip if already in same group
+            if find(i) == find(j):
+                continue
+            ratio = difflib.SequenceMatcher(None, texts[i], texts[j]).ratio()
+            if ratio >= similarity_threshold:
+                union(i, j)
+
+    # Collect groups
+    groups: dict[int, list[int]] = defaultdict(list)
+    for i in range(len(comments)):
+        groups[find(i)].append(i)
+
+    result: list[dict] = []
+    for members in groups.values():
+        if len(members) == 1:
+            result.append(comments[members[0]])
+            continue
+
+        # Pick the representative (first comment in the group)
+        rep_idx = members[0]
+        rep = dict(comments[rep_idx])  # shallow copy
+        others = members[1:]
+
+        # Build "also found at" summary
+        locations = []
+        for idx in others:
+            c = comments[idx]
+            locations.append(f"`{c['path']}:{c['line']}`")
+
+        also_note = (
+            f"\n\n---\n🔁 **Same pattern in {len(others)} other location{'s' if len(others) != 1 else ''}:** "
+            + ", ".join(locations)
+        )
+        rep["body"] = rep["body"] + also_note
+        result.append(rep)
+        log.info(
+            "Grouped %d similar findings into 1 comment (%s:%s)",
+            len(members), rep["path"], rep["line"],
+        )
+
+    return result
+
+
 def post_review(
     owner: str,
     repo: str,
@@ -255,6 +339,13 @@ def post_review(
         dupes = before_count - len(inline_comments)
         if dupes:
             log.info("Deduplicated %d comments (already posted)", dupes)
+
+    # Group similar findings within this review to avoid spam
+    before_group = len(inline_comments)
+    inline_comments = _group_similar_inline_comments(inline_comments)
+    grouped = before_group - len(inline_comments)
+    if grouped:
+        log.info("Grouped %d similar comments into representative comments", grouped)
 
     # Build the body
     body = _build_review_body(result, inline_count=len(inline_comments), observation_issues=observation_issues)
