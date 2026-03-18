@@ -311,6 +311,72 @@ def dismiss_resolved(
     console.print(f"[dim]Resolved {count} dismissed thread(s)[/dim]")
 
 
+@app.command(name="resolve-addressed")
+def resolve_addressed(
+    pr_url: str = typer.Argument(
+        default="",
+        help="GitHub PR URL (auto-detected from event context if omitted)",
+    ),
+):
+    """Auto-resolve Vigil threads where the commented code has changed.
+
+    Compares the current PR head against the last Vigil review commit.
+    Any Vigil thread whose file+line was modified since the last review
+    is resolved automatically (the code was addressed).
+    """
+    token = os.environ.get("GITHUB_TOKEN")
+    if not token:
+        console.print("[red]Error:[/red] Set GITHUB_TOKEN environment variable.")
+        raise typer.Exit(1)
+
+    if not pr_url:
+        console.print("[red]Error:[/red] PR URL required.")
+        raise typer.Exit(1)
+
+    owner, repo, pr_number = parse_pr_url(pr_url)
+    pr_data = get_pr_data(owner, repo, pr_number, token)
+
+    # Find the last Vigil review SHA
+    last_sha = get_last_reviewed_sha(owner, repo, pr_number, token)
+    if not last_sha:
+        console.print("[dim]No previous Vigil review found — nothing to resolve[/dim]")
+        raise typer.Exit(0)
+
+    console.print(f"[dim]Last Vigil review at {last_sha[:7]}, head is {pr_data['head_sha'][:7]}[/dim]")
+
+    if last_sha == pr_data["head_sha"]:
+        console.print("[dim]No new commits since last review — nothing to resolve[/dim]")
+        raise typer.Exit(0)
+
+    # Get files changed since last review
+    try:
+        changed_files = get_changed_files_between_commits(
+            owner, repo, last_sha, pr_data["head_sha"], token,
+        )
+    except Exception as e:
+        console.print(f"[dim yellow]Could not compare commits (force-push?): {e}[/dim yellow]")
+        raise typer.Exit(0)
+
+    if not changed_files:
+        console.print("[dim]No files changed since last review[/dim]")
+        raise typer.Exit(0)
+
+    console.print(f"[dim]{len(changed_files)} file(s) changed since last review[/dim]")
+
+    # Build the line map from the full PR diff
+    incremental_lines = commentable_lines(pr_data["diff"])
+    changed_set = set(changed_files)
+    changed_line_map = {f: lines for f, lines in incremental_lines.items() if f in changed_set}
+
+    count = resolve_addressed_threads(owner, repo, pr_number, token, changed_line_map)
+    console.print(f"[dim]Auto-resolved {count} addressed thread(s)[/dim]")
+
+    # Also dismiss any threads with "resolved" replies while we're at it
+    dismissed = resolve_dismissed_threads(owner, repo, pr_number, token)
+    if dismissed:
+        console.print(f"[dim]Also resolved {dismissed} dismissed thread(s)[/dim]")
+
+
 @app.command()
 def serve(
     port: int = typer.Option(8000, "--port", "-p", help="Port to listen on"),

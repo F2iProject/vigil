@@ -16,14 +16,11 @@ name: Vigil PR Review
 
 on:
   pull_request:
-    types: [opened, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review]
+  pull_request_review_comment:
+    types: [created]
   issue_comment:
     types: [created]
-
-# Cancel in-progress reviews when a new one is triggered
-concurrency:
-  group: vigil-${{ github.event.pull_request.number || github.event.issue.number }}
-  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -32,6 +29,9 @@ permissions:
 jobs:
   review:
     runs-on: ubuntu-latest
+    concurrency:
+      group: vigil-review-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: true
     # PR events: skip drafts and bot PRs
     # Comment events: must be on a PR and contain /vigil review
     if: >-
@@ -63,23 +63,51 @@ jobs:
 
   dismiss:
     runs-on: ubuntu-latest
-    # Resolve Vigil threads when someone replies "resolved"
+    # Resolve Vigil threads when someone replies "resolved" to an inline comment
+    # or posts "resolved" in the PR conversation
     if: >-
-      github.event_name == 'issue_comment' &&
-      github.event.issue.pull_request &&
-      !contains(github.event.comment.body, '/vigil review') &&
       (
-        contains(github.event.comment.body, 'resolved') ||
-        contains(github.event.comment.body, 'Resolved')
+        github.event_name == 'pull_request_review_comment' &&
+        (
+          contains(github.event.comment.body, 'resolved') ||
+          contains(github.event.comment.body, 'Resolved') ||
+          contains(github.event.comment.body, 'fixed') ||
+          contains(github.event.comment.body, 'Fixed') ||
+          contains(github.event.comment.body, 'addressed') ||
+          contains(github.event.comment.body, 'Addressed') ||
+          contains(github.event.comment.body, 'done') ||
+          contains(github.event.comment.body, 'Done')
+        )
+      ) || (
+        github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request &&
+        !contains(github.event.comment.body, '/vigil review') &&
+        (
+          contains(github.event.comment.body, 'resolved') ||
+          contains(github.event.comment.body, 'Resolved')
+        )
       )
     steps:
       - name: Determine PR URL
         id: pr
         shell: bash
         run: |
-          echo "url=${{ github.event.issue.pull_request.html_url }}" >> "$GITHUB_OUTPUT"
+          echo "url=${{ github.event.pull_request.html_url || github.event.issue.pull_request.html_url }}" >> "$GITHUB_OUTPUT"
 
       - uses: F2iProject/vigil@v1
         with:
           pr-url: ${{ steps.pr.outputs.url }}
           command: dismiss-resolved
+
+  resolve-addressed:
+    runs-on: ubuntu-latest
+    # Auto-resolve Vigil threads when code at commented lines changes
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.action == 'synchronize' &&
+      github.event.pull_request.draft == false
+    steps:
+      - uses: F2iProject/vigil@v1
+        with:
+          command: resolve-addressed
+          gemini-api-key: ${{ secrets.GEMINI_API_KEY }}

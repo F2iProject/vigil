@@ -12,7 +12,7 @@ inputs:
     required: false
     default: ""
   command:
-    description: "Command to run: review (default), dismiss-resolved"
+    description: "Command to run: review (default), dismiss-resolved, resolve-addressed"
     required: false
     default: "review"
   model:
@@ -70,6 +70,8 @@ runs:
 
         if [ "$COMMAND" = "dismiss-resolved" ]; then
           vigil dismiss-resolved "$PR_URL"
+        elif [ "$COMMAND" = "resolve-addressed" ]; then
+          vigil resolve-addressed "$PR_URL"
         else
           ARGS=(
             "$PR_URL"
