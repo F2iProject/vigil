@@ -293,20 +293,23 @@ def _extract_finding_from_regex(
 def _find_overlapping_fingerprints(
     target: FindingFingerprint,
     candidates: list[FindingFingerprint],
-    sorted_starts: list[int] | None = None,
+    sorted_starts: list[int] | None = None,  # deprecated, kept for backward compat — ignored
 ) -> list[FindingFingerprint]:
     """Find fingerprints with overlapping line ranges using binary search.
 
-    For large candidate lists, this is O(log N + k) instead of O(N)
-    where k is the number of overlapping results.
+    Sorts candidates internally by line_range[0] if not already sorted.
+    Time complexity: O(N log N + k) where k is the number of overlapping results.
+    (Dominated by sorting; typically O(log N + k) when called from filter_cross_round_duplicates
+    with pre-sorted candidates.)
+
+    The sorted_starts parameter is deprecated and ignored.
 
     Unlocated findings (line_range = (0, 0)) match any target.
 
     Args:
         target: The target fingerprint to match against
-        candidates: List of candidate fingerprints (all with same file + category)
-        sorted_starts: Optional pre-computed list of line_range[0] for candidates,
-                      sorted for binary search. If None, will be computed.
+        candidates: List of candidate fingerprints (will be sorted by line_range[0])
+        sorted_starts: Deprecated. Ignored. Will be removed in a future release.
 
     Returns:
         List of candidate fingerprints that have overlapping line ranges
@@ -318,32 +321,32 @@ def _find_overlapping_fingerprints(
 
     target_start, target_end = target.line_range
 
-    # Build sorted_starts if not provided
-    if sorted_starts is None:
-        sorted_starts = sorted(fp.line_range[0] for fp in candidates)
+    # Sort candidates by line_range[0] for binary search
+    # When called from filter_cross_round_duplicates with pre-sorted input, this is O(N)
+    sorted_candidates = sorted(candidates, key=lambda fp: fp.line_range[0])
 
-    # Binary search: find candidates whose start <= target_end
-    # bisect_right gives us the insertion point, so we check all indices < that point
-    right_idx = bisect.bisect_right(sorted_starts, target_end)
+    # Binary search: find the rightmost index where start <= target_end.
+    # Candidates with line_range[0] > target_end cannot overlap with target.
+    starts = [fp.line_range[0] for fp in sorted_candidates]  # O(N)
+    right_idx = bisect.bisect_right(starts, target_end)  # O(log N)
 
-    # Filter: only keep candidates whose ranges actually overlap
-    # and whose message_hash matches
-    result = []
-    for i in range(right_idx):
-        # Get the line start value at this sorted position
-        target_start_val = sorted_starts[i]
-
-        # Find all candidates with this start value (may be multiple due to duplicates)
-        for fp in candidates:
-            if fp.line_range[0] == target_start_val:
-                fp_start, fp_end = fp.line_range
-                # Check if ranges overlap and message hash matches
-                if (
-                    (fp_end >= target_start or fp.line_range == (0, 0))
-                    and fp.message_hash == target.message_hash
-                ):
-                    if fp not in result:  # Avoid duplicates
-                        result.append(fp)
+    # Iterate only the relevant slice [0:right_idx] — O(k)
+    # Use a seen set for O(1) deduplication
+    seen: set[int] = set()  # track by id() to avoid hashability requirements
+    result: list[FindingFingerprint] = []
+    for fp in sorted_candidates[:right_idx]:
+        fp_start, fp_end = fp.line_range
+        # Overlap condition: fp_end >= target_start (fp_start <= target_end already
+        # guaranteed by binary search above)
+        # Also accept unlocated findings (0, 0)
+        if (
+            (fp.line_range == (0, 0) or fp_end >= target_start)
+            and fp.message_hash == target.message_hash
+        ):
+            fp_id = id(fp)
+            if fp_id not in seen:
+                seen.add(fp_id)
+                result.append(fp)
 
     return result
 
@@ -391,6 +394,10 @@ def filter_cross_round_duplicates(
             if key not in existing_fingerprints_by_file_cat:
                 existing_fingerprints_by_file_cat[key] = []
             existing_fingerprints_by_file_cat[key].append(fp)
+
+    # Pre-sort each candidate list by line_range[0] for O(log N + k) spatial lookup
+    for key in existing_fingerprints_by_file_cat:
+        existing_fingerprints_by_file_cat[key].sort(key=lambda fp: fp.line_range[0])
 
     # Filter: keep only findings that don't match existing ones
     result = []

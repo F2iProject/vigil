@@ -745,3 +745,45 @@ class TestSpatialLookup:
         result = _find_overlapping_fingerprints(target, candidates)
         assert len(result) == 1
         assert result[0].line_range == (100, 105)
+
+    def test_no_duplicates_when_candidates_share_start_line(self):
+        """Test that multiple candidates at same start line are returned once each."""
+        from vigil.context_manager import _find_overlapping_fingerprints
+
+        # Target at line 15 with range (13, 17)
+        target = FindingFingerprint(
+            file="src/auth.py",
+            category="SQL Injection",
+            message_hash="shared_hash",
+            line_range=(13, 17),
+        )
+
+        # Three candidates all starting at line 10, all with matching message_hash
+        candidates = [
+            FindingFingerprint(
+                file="src/auth.py",
+                category="SQL Injection",
+                message_hash="shared_hash",
+                line_range=(10, 20),  # Overlaps with target
+            ),
+            FindingFingerprint(
+                file="src/auth.py",
+                category="SQL Injection",
+                message_hash="shared_hash",
+                line_range=(10, 25),  # Overlaps with target
+            ),
+            FindingFingerprint(
+                file="src/auth.py",
+                category="SQL Injection",
+                message_hash="shared_hash",
+                line_range=(10, 30),  # Overlaps with target
+            ),
+        ]
+
+        result = _find_overlapping_fingerprints(target, candidates)
+        # All three should be returned (they all overlap)
+        assert len(result) == 3
+        # Each should appear exactly once (no duplicates)
+        assert result[0].line_range == (10, 20)
+        assert result[1].line_range == (10, 25)
+        assert result[2].line_range == (10, 30)
