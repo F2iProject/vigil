@@ -293,27 +293,26 @@ def _extract_finding_from_regex(
 def _find_overlapping_fingerprints(
     target: FindingFingerprint,
     candidates: list[FindingFingerprint],
-    sorted_starts: list[int] | None = None,  # deprecated, kept for backward compat — ignored
 ) -> list[FindingFingerprint]:
     """Find fingerprints with overlapping line ranges using binary search.
 
-    Sorts candidates internally by line_range[0] if not already sorted.
-    Time complexity: O(N log N + k) where k is the number of overlapping results.
-    (Dominated by sorting; typically O(log N + k) when called from filter_cross_round_duplicates
-    with pre-sorted candidates.)
+    **Precondition**: ``candidates`` must be sorted by ``line_range[0]`` in
+    ascending order. ``filter_cross_round_duplicates`` guarantees this by
+    pre-sorting each candidate group once before invoking this function.
 
-    The sorted_starts parameter is deprecated and ignored.
+    Time complexity: O(log N + k) where N = len(candidates) and k is the number
+    of overlapping results.  The binary search identifies the upper boundary in
+    O(log N); only the k relevant candidates are inspected afterward.
 
     Unlocated findings (line_range = (0, 0)) match any target.
 
     Args:
-        target: The target fingerprint to match against
-        candidates: List of candidate fingerprints (will be sorted by line_range[0])
-        sorted_starts: Deprecated. Ignored. Will be removed in a future release.
+        target: The target fingerprint to match against.
+        candidates: List of candidate fingerprints, pre-sorted by line_range[0].
 
     Returns:
-        List of candidate fingerprints that have overlapping line ranges
-        with the target and matching message_hash.
+        List of candidate fingerprints whose line ranges overlap with the target
+        and whose message_hash matches.
     """
     if target.line_range == (0, 0):
         # Unlocated target matches everything with same message hash
@@ -321,20 +320,16 @@ def _find_overlapping_fingerprints(
 
     target_start, target_end = target.line_range
 
-    # Sort candidates by line_range[0] for binary search
-    # When called from filter_cross_round_duplicates with pre-sorted input, this is O(N)
-    sorted_candidates = sorted(candidates, key=lambda fp: fp.line_range[0])
-
     # Binary search: find the rightmost index where start <= target_end.
     # Candidates with line_range[0] > target_end cannot overlap with target.
-    starts = [fp.line_range[0] for fp in sorted_candidates]  # O(N)
+    starts = [fp.line_range[0] for fp in candidates]  # O(N)
     right_idx = bisect.bisect_right(starts, target_end)  # O(log N)
 
     # Iterate only the relevant slice [0:right_idx] — O(k)
     # Use a seen set for O(1) deduplication
     seen: set[int] = set()  # track by id() to avoid hashability requirements
     result: list[FindingFingerprint] = []
-    for fp in sorted_candidates[:right_idx]:
+    for fp in candidates[:right_idx]:
         fp_start, fp_end = fp.line_range
         # Overlap condition: fp_end >= target_start (fp_start <= target_end already
         # guaranteed by binary search above)
