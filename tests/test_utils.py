@@ -147,10 +147,18 @@ class TestValidateSpecialistName:
         assert validate_specialist_name("Logic Reviewer") == "Logic Reviewer"
 
     def test_strips_special_chars(self):
-        result = validate_specialist_name("Security<script>")
-        assert "<" not in result
-        assert "script" not in result
+        result = validate_specialist_name("Security@#$%")
+        assert "@" not in result
+        assert "#" not in result
         assert "Security" in result
+
+    def test_strips_html_tags_from_name(self):
+        """HTML tags embedded in names should be sanitized."""
+        result = validate_specialist_name("Evil<script>alert(1)</script>Name")
+        assert "<script>" not in result
+        assert "alert" not in result
+        assert "Evil" in result
+        assert "Name" in result
 
     def test_allows_hyphen_underscore(self):
         assert validate_specialist_name("Security-Team") == "Security-Team"

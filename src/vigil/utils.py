@@ -92,19 +92,18 @@ def sanitize_markdown(text: str) -> str:
     if not text:
         return ""
 
-    # Strip HTML tags entirely (prevents <script>, <img onerror>, etc.)
-    # Match opening/closing tags and self-closing tags
+    # Strip dangerous HTML tags AND their content (script, style, iframe, etc.)
+    text = re.sub(
+        r"<\s*(script|style|iframe|object|embed|applet|form)\b[^>]*>.*?</\s*\1\s*>",
+        "",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    # Strip remaining HTML tags (keep content, remove tag markers)
     text = re.sub(r"<[^>]+>", "", text)
 
-    # Escape dangerous markdown patterns that could break out of formatting:
-    # - Backticks at start/end (could break code fence)
-    # - Multiple asterisks/underscores (could break bold/italic)
-    # - Square brackets followed by parens (could create links)
-    text = re.sub(r"^`+", r"\\g<0>", text, flags=re.MULTILINE)  # Escape leading backticks
-    text = re.sub(r"`+$", r"\\g<0>", text, flags=re.MULTILINE)  # Escape trailing backticks
-
     # Escape markdown link syntax: [text](url) -> prevent link injection
-    # Replace [ with \[ when followed by text and )
     text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\\[\1\\](\2)", text)
 
     # Normalize line breaks to prevent confusion
@@ -129,6 +128,16 @@ def validate_specialist_name(name: str, max_length: int = 50) -> str:
     """
     if not name:
         return "Unknown"
+
+    # Strip dangerous HTML tags AND their content (e.g., "Security<script>alert(1)</script>" -> "Security")
+    name = re.sub(
+        r"<\s*(script|style|iframe|object|embed)\b[^>]*>.*?</\s*\1\s*>",
+        "",
+        name,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    # Strip any remaining HTML tags (keep content between non-dangerous tags)
+    name = re.sub(r"<[^>]*>", " ", name)
 
     # Keep only safe characters: alphanumeric, space, hyphen, underscore
     safe_name = re.sub(r"[^a-zA-Z0-9\s\-_]", "", name)

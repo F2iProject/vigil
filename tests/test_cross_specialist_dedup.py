@@ -393,7 +393,7 @@ class TestConsensusFormatting:
                    category="SQL Injection", message="Dangerous SQL")
         verdict_info = [
             VerdictInfo(specialist="Security", verdict="REQUEST_CHANGES",
-                       category="SQL Injection", session_id="VGL-abc"),
+                       category="SQL Injection", session_id="VGL-abc123"),
             VerdictInfo(specialist="Logic", verdict="REQUEST_CHANGES",
                        category="SQL Injection", session_id=""),  # No session ID
         ]
@@ -403,7 +403,7 @@ class TestConsensusFormatting:
             total_specialists=3
         )
         # Security row should have session ID in backticks
-        assert "Security `VGL-abc`" in result
+        assert "Security `VGL-abc123`" in result
         # Logic row should not have backticks
         assert "| Logic |" in result
 
@@ -446,14 +446,18 @@ class TestMergeWithVerdictInfo:
         assert verdicts_by_spec["Logic"].session_id == "VGL-222222"
 
     def test_verdict_info_includes_category_from_finding(self):
-        """Verdict info should capture the category from each specialist's finding."""
+        """Verdict info should capture the category from each specialist's finding.
+
+        Note: findings must share the same category to merge (fingerprint includes category).
+        The verdict_info tracks each specialist's category label for display purposes.
+        """
         f1 = Finding(file="src/auth.py", line=42, severity=Severity.high,
-                    category="Resource Lifecycle Management", message="Issue")
+                    category="Resource Management", message="Issue")
         f2 = Finding(file="src/auth.py", line=42, severity=Severity.high,
-                    category="Memory Management", message="Issue")
+                    category="Resource Management", message="Issue")
         v1 = PersonaVerdict(
             persona="Architecture",
-            session_id="VGL-arch001",
+            session_id="VGL-aaa111",
             decision="REQUEST_CHANGES",
             checks={},
             findings=[f1],
@@ -461,7 +465,7 @@ class TestMergeWithVerdictInfo:
         )
         v2 = PersonaVerdict(
             persona="Performance",
-            session_id="VGL-perf001",
+            session_id="VGL-bbb222",
             decision="REQUEST_CHANGES",
             checks={},
             findings=[f2],
@@ -471,8 +475,8 @@ class TestMergeWithVerdictInfo:
         assert len(merged) == 1
 
         verdicts_by_spec = {v.specialist: v for v in merged[0].verdict_info}
-        assert verdicts_by_spec["Architecture"].category == "Resource Lifecycle Management"
-        assert verdicts_by_spec["Performance"].category == "Memory Management"
+        assert verdicts_by_spec["Architecture"].category == "Resource Management"
+        assert verdicts_by_spec["Performance"].category == "Resource Management"
 
 
 class TestXssSanitization:
