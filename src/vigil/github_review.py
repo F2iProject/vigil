@@ -291,11 +291,16 @@ def post_review(
     All findings are forced inline where possible. Only falls back to the
     review body when the diff is completely empty.
 
+    When multiple specialists flag the same issue, merged findings are posted
+    with special formatting showing which specialists flagged the issue.
+
     Args:
         owner: Repository owner.
         repo: Repository name.
         pr_number: Pull request number.
         result: The aggregated ReviewResult with findings and observations.
+            result.lead_findings may include merged findings from multiple
+            specialists (see cross_specialist_dedup for formatting).
         token: GitHub API token.
         diff: Raw diff text for computing commentable lines.
         existing_comments: Pre-fetched Vigil comments for deduplication.

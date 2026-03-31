@@ -188,6 +188,8 @@ def filter_cross_round_duplicates(
     the "finding fatigue" where Vigil keeps re-flagging the same issues
     round after round.
 
+    Uses fingerprint set pre-building for O(N+M) performance instead of O(N*M).
+
     Args:
         new_findings: Findings from the current review round
         existing_comments: Comments from previous rounds (fetched from GitHub,
@@ -199,8 +201,9 @@ def filter_cross_round_duplicates(
     if not existing_comments:
         return list(new_findings)
 
-    # Extract and fingerprint existing findings
-    existing_fingerprints: set[FindingFingerprint] = set()
+    # Pre-build set of existing fingerprints for O(1) lookup
+    # Group by file+category for faster initial filtering
+    existing_fingerprints_by_file_cat: dict[tuple[str, str], list[FindingFingerprint]] = {}
     for comment in existing_comments:
         existing_finding = extract_finding_from_comment(
             comment.get("body", ""),
@@ -209,16 +212,26 @@ def filter_cross_round_duplicates(
         )
         if existing_finding:
             fp = fingerprint_finding(existing_finding)
-            existing_fingerprints.add(fp)
+            key = (fp.file, fp.category)
+            if key not in existing_fingerprints_by_file_cat:
+                existing_fingerprints_by_file_cat[key] = []
+            existing_fingerprints_by_file_cat[key].append(fp)
 
     # Filter: keep only findings that don't match existing ones
     result = []
     for new_finding in new_findings:
         new_fp = fingerprint_finding(new_finding)
+        key = (new_fp.file, new_fp.category)
+
+        # Quick pre-filter: if file+category not in existing, keep the finding
+        if key not in existing_fingerprints_by_file_cat:
+            result.append(new_finding)
+            continue
+
         # Check if this finding matches any existing one (cross-round match)
         is_duplicate = any(
             fingerprints_match(new_fp, existing_fp, exact_line=False)
-            for existing_fp in existing_fingerprints
+            for existing_fp in existing_fingerprints_by_file_cat[key]
         )
         if is_duplicate:
             log.debug(

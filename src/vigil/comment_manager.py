@@ -603,7 +603,15 @@ def deduplicate_comments(
 ) -> list[dict]:
     """Filter out new comments that are duplicates of existing Vigil comments.
 
-    Pre-indexes existing comments by file path to avoid O(N*M) full scans.
+    Pre-indexes existing comments by file path for O(N+M) performance.
+
+    Args:
+        new_comments: New comments to filter
+        existing_comments: Existing comments from previous rounds
+        threshold: Similarity threshold (default 0.85) for fuzzy matching
+
+    Returns:
+        Filtered list of new comments, excluding duplicates
     """
     if not existing_comments:
         return list(new_comments)
@@ -624,86 +632,3 @@ def deduplicate_comments(
     return result
 
 
-def filter_against_existing_findings(
-    new_findings: list[dict],
-    existing_comments: list[dict],
-) -> list[dict]:
-    """Filter new inline comments that duplicate existing Vigil findings from previous rounds.
-
-    Uses the cross-round context logic from context_manager to fingerprint findings
-    and match them even when line numbers shift slightly or messages are paraphrased.
-
-    Args:
-        new_findings: List of new inline comment dicts with 'path', 'line', 'body'
-        existing_comments: List of existing comment dicts from previous rounds
-
-    Returns:
-        Filtered list of new findings, excluding cross-round duplicates
-    """
-    if not existing_comments:
-        return list(new_findings)
-
-    try:
-        from .context_manager import (
-            extract_finding_from_comment,
-            fingerprint_finding,
-            fingerprints_match,
-        )
-
-        # Extract and fingerprint existing findings
-        existing_fingerprints = {}
-        for comment in existing_comments:
-            existing_finding = extract_finding_from_comment(
-                comment.get("body", ""),
-                comment.get("path"),
-                comment.get("line") or comment.get("original_line"),
-            )
-            if existing_finding:
-                fp = fingerprint_finding(existing_finding)
-                if fp not in existing_fingerprints:
-                    existing_fingerprints[fp] = []
-                existing_fingerprints[fp].append(existing_finding)
-
-        # Filter new findings
-        result = []
-        for new_comment in new_findings:
-            # Try to reconstruct finding from new comment
-            new_finding = extract_finding_from_comment(
-                new_comment.get("body", ""),
-                new_comment.get("path"),
-                new_comment.get("line"),
-            )
-            if not new_finding:
-                # Can't parse — keep it (safer to post than skip)
-                result.append(new_comment)
-                continue
-
-            new_fp = fingerprint_finding(new_finding)
-
-            # Check if matches any existing finding
-            is_cross_round_dup = False
-            for existing_fp in existing_fingerprints:
-                if fingerprints_match(new_fp, existing_fp, exact_line=False):
-                    is_cross_round_dup = True
-                    break
-
-            if is_cross_round_dup:
-                log.debug(
-                    "Skipping cross-round dup: %s:%s [%s]",
-                    new_comment.get("path"),
-                    new_comment.get("line"),
-                    new_finding.category,
-                )
-            else:
-                result.append(new_comment)
-
-        if len(result) < len(new_findings):
-            skipped = len(new_findings) - len(result)
-            log.info("Filtered %d cross-round duplicate(s)", skipped)
-
-        return result
-
-    except ImportError:
-        # Fallback if context_manager not available
-        log.warning("context_manager not available, skipping cross-round filtering")
-        return list(new_findings)
