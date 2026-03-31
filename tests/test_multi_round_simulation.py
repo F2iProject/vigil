@@ -532,6 +532,4 @@ class TestMultiRoundMixedScenarios:
 
         # Verify duplicates were filtered
         assert "SQL Injection" not in categories
-        assert "XSS" not in categories or any(
-            f.category == "XSS" for f in result
-        ), "XSS was marked as duplicate"
+        assert "XSS" not in categories, "XSS should have been filtered as a duplicate"
