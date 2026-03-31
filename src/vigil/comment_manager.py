@@ -603,7 +603,15 @@ def deduplicate_comments(
 ) -> list[dict]:
     """Filter out new comments that are duplicates of existing Vigil comments.
 
-    Pre-indexes existing comments by file path to avoid O(N*M) full scans.
+    Pre-indexes existing comments by file path for O(N+M) performance.
+
+    Args:
+        new_comments: New comments to filter
+        existing_comments: Existing comments from previous rounds
+        threshold: Similarity threshold (default 0.85) for fuzzy matching
+
+    Returns:
+        Filtered list of new comments, excluding duplicates
     """
     if not existing_comments:
         return list(new_comments)
@@ -622,3 +630,5 @@ def deduplicate_comments(
         if not candidates or not is_duplicate_finding(c, candidates, threshold):
             result.append(c)
     return result
+
+

@@ -213,8 +213,9 @@ def review_diff(
     1. Dispatch all specialists with staggered starts
     2. Collect verdicts and filter known decisions
     3. Send email alerts for alert-enabled personas
-    4. Run lead reviewer with all verdicts
-    5. Return aggregated result
+    4. Merge overlapping findings from multiple specialists into single comments
+    5. Run lead reviewer with all verdicts
+    6. Return aggregated result with merged findings in lead_findings
 
     Args:
         diff: Raw unified diff text.
@@ -226,6 +227,12 @@ def review_diff(
         repo_key: Repository in "owner/repo" format. When provided, findings are
             checked against the decision log and previously-acknowledged patterns
             are suppressed before the lead review.
+
+    Returns:
+        ReviewResult with:
+        - specialist_verdicts: verdicts with merged findings removed
+        - lead_findings: aggregated lead findings + deduped merged findings
+        - observations: all non-blocking observations from all specialists
     """
     lead_model = lead_model or model
 
@@ -334,6 +341,56 @@ def review_diff(
     decision, summary, lead_findings = _run_lead_review(
         profile.lead_prompt, lead_pr_block, verdicts, lead_model
     )
+
+    # --- Step 3.5: Cross-specialist deduplication ---
+    # When multiple specialists flag the same issue at the same location,
+    # merge them into a single finding with specialist attribution.
+    # The deduped findings are stored in the ReviewResult and made available
+    # to the posting pipeline via a new merged_findings field.
+    merged_findings_info: list = []  # List of (deduped_finding, specialists, original_findings)
+    try:
+        from .cross_specialist_dedup import merge_specialist_findings
+        deduped_findings, merged_info = merge_specialist_findings(verdicts)
+
+        if merged_info:
+            import logging
+            logging_module = logging.getLogger(__name__)
+            logging_module.info(
+                "Deduped %d cross-specialist finding group(s)",
+                len(merged_info),
+            )
+
+            # Collect all findings that are part of merged groups (to remove from individual verdicts)
+            merged_finding_ids: set[int] = set()
+            for info in merged_info:
+                for orig_finding in info.original_findings:
+                    merged_finding_ids.add(id(orig_finding))
+                # Store metadata for later use in posting pipeline
+                merged_findings_info.append({
+                    "finding": info.finding,
+                    "specialists": info.specialists,
+                    "original_findings": info.original_findings,
+                    "count": info.count,
+                })
+
+            # Update all specialist verdicts: remove findings that were merged
+            for v in verdicts:
+                old_count = len(v.findings)
+                v.findings = [f for f in v.findings if id(f) not in merged_finding_ids]
+                if len(v.findings) < old_count:
+                    logging_module.debug(
+                        "Removed %d merged findings from %s",
+                        old_count - len(v.findings),
+                        v.persona,
+                    )
+
+            # Add the deduped findings to lead_findings so they flow to the posting pipeline
+            # This ensures merged findings are actually posted
+            lead_findings.extend(deduped_findings)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).debug("Cross-specialist dedup failed: %s", e)
+
 
     # --- Step 3: Aggregate observations with persona tracking ---
     all_observations: list[Finding] = []
