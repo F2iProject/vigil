@@ -11,6 +11,7 @@ This enables finding matching even when:
 - The thread is marked as resolved (we still skip to respect prior feedback)
 """
 
+import bisect
 import hashlib
 import json
 import logging
@@ -289,9 +290,68 @@ def _extract_finding_from_regex(
     )
 
 
+def _find_overlapping_fingerprints(
+    target: FindingFingerprint,
+    candidates: list[FindingFingerprint],
+    sorted_starts: list[int] | None = None,
+) -> list[FindingFingerprint]:
+    """Find fingerprints with overlapping line ranges using binary search.
+
+    For large candidate lists, this is O(log N + k) instead of O(N)
+    where k is the number of overlapping results.
+
+    Unlocated findings (line_range = (0, 0)) match any target.
+
+    Args:
+        target: The target fingerprint to match against
+        candidates: List of candidate fingerprints (all with same file + category)
+        sorted_starts: Optional pre-computed list of line_range[0] for candidates,
+                      sorted for binary search. If None, will be computed.
+
+    Returns:
+        List of candidate fingerprints that have overlapping line ranges
+        with the target and matching message_hash.
+    """
+    if target.line_range == (0, 0):
+        # Unlocated target matches everything with same message hash
+        return [fp for fp in candidates if fp.message_hash == target.message_hash]
+
+    target_start, target_end = target.line_range
+
+    # Build sorted_starts if not provided
+    if sorted_starts is None:
+        sorted_starts = sorted(fp.line_range[0] for fp in candidates)
+
+    # Binary search: find candidates whose start <= target_end
+    # bisect_right gives us the insertion point, so we check all indices < that point
+    right_idx = bisect.bisect_right(sorted_starts, target_end)
+
+    # Filter: only keep candidates whose ranges actually overlap
+    # and whose message_hash matches
+    result = []
+    for i in range(right_idx):
+        # Get the line start value at this sorted position
+        target_start_val = sorted_starts[i]
+
+        # Find all candidates with this start value (may be multiple due to duplicates)
+        for fp in candidates:
+            if fp.line_range[0] == target_start_val:
+                fp_start, fp_end = fp.line_range
+                # Check if ranges overlap and message hash matches
+                if (
+                    (fp_end >= target_start or fp.line_range == (0, 0))
+                    and fp.message_hash == target.message_hash
+                ):
+                    if fp not in result:  # Avoid duplicates
+                        result.append(fp)
+
+    return result
+
+
 def filter_cross_round_duplicates(
     new_findings: list[Finding],
     existing_comments: list[dict],
+    spatial_lookup_threshold: int = 10,
 ) -> list[Finding]:
     """Filter out findings that match findings from previous rounds.
 
@@ -300,12 +360,15 @@ def filter_cross_round_duplicates(
     the "finding fatigue" where Vigil keeps re-flagging the same issues
     round after round.
 
-    Uses fingerprint set pre-building for O(N+M) performance instead of O(N*M).
+    Uses fingerprint grouping by (file, category) for O(1) lookup and optional
+    spatial lookup optimization for large candidate lists.
 
     Args:
         new_findings: Findings from the current review round
         existing_comments: Comments from previous rounds (fetched from GitHub,
                           includes resolved threads via fetch_all_vigil_comments)
+        spatial_lookup_threshold: When candidate list exceeds this size, use
+                                 binary search spatial lookup. Default 10.
 
     Returns:
         List of new findings, excluding those that match existing comments
@@ -341,10 +404,19 @@ def filter_cross_round_duplicates(
             continue
 
         # Check if this finding matches any existing one (cross-round match)
-        is_duplicate = any(
-            fingerprints_match(new_fp, existing_fp, exact_line=False)
-            for existing_fp in existing_fingerprints_by_file_cat[key]
-        )
+        candidates = existing_fingerprints_by_file_cat[key]
+
+        # Use spatial lookup if candidate list is large
+        if len(candidates) > spatial_lookup_threshold:
+            overlapping = _find_overlapping_fingerprints(new_fp, candidates)
+            is_duplicate = len(overlapping) > 0
+        else:
+            # Linear scan for small lists
+            is_duplicate = any(
+                fingerprints_match(new_fp, existing_fp, exact_line=False)
+                for existing_fp in candidates
+            )
+
         if is_duplicate:
             log.debug(
                 "Skipping cross-round duplicate: %s:%s [%s] (already posted)",
