@@ -301,8 +301,9 @@ def _find_overlapping_fingerprints(
     pre-sorting each candidate group once before invoking this function.
 
     Time complexity: O(log N + k) where N = len(candidates) and k is the number
-    of overlapping results.  The binary search identifies the upper boundary in
-    O(log N); only the k relevant candidates are inspected afterward.
+    of overlapping results. ``bisect.bisect_right`` with a ``key`` function
+    (Python ≥ 3.10) locates the boundary in O(log N) with no intermediate list;
+    only the k relevant candidates are inspected afterward.
 
     Unlocated findings (line_range = (0, 0)) match any target.
 
@@ -320,10 +321,13 @@ def _find_overlapping_fingerprints(
 
     target_start, target_end = target.line_range
 
-    # Binary search: find the rightmost index where start <= target_end.
-    # Candidates with line_range[0] > target_end cannot overlap with target.
-    starts = [fp.line_range[0] for fp in candidates]  # O(N)
-    right_idx = bisect.bisect_right(starts, target_end)  # O(log N)
+    # Binary search: find the rightmost index where line_range[0] <= target_end.
+    # bisect.bisect_right with key= avoids building an intermediate list — O(log N).
+    # Requires Python >= 3.10 (key parameter added in 3.10); pyproject.toml
+    # specifies python_requires >= "3.11" so this is always available.
+    right_idx = bisect.bisect_right(
+        candidates, target_end, key=lambda fp: fp.line_range[0]
+    )  # O(log N)
 
     # Iterate only the relevant slice [0:right_idx] — O(k)
     # Use a seen set for O(1) deduplication
