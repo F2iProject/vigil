@@ -335,6 +335,38 @@ def review_diff(
         profile.lead_prompt, lead_pr_block, verdicts, lead_model
     )
 
+    # --- Step 3.5: Cross-specialist deduplication ---
+    # When multiple specialists flag the same issue at the same location,
+    # merge them into a single finding with specialist attribution
+    try:
+        from .cross_specialist_dedup import merge_specialist_findings
+        deduped_findings, merged_info = merge_specialist_findings(verdicts)
+        
+        if merged_info:
+            import logging
+            logging_module = logging.getLogger(__name__)
+            logging_module.info(
+                "Deduped %d cross-specialist finding group(s)",
+                len(merged_info),
+            )
+            
+            # Update all specialist verdicts to use deduped findings
+            for v in verdicts:
+                # Remove findings that were merged (they'll appear once as deduplicated)
+                old_count = len(v.findings)
+                merged_finding_ids = {id(info.finding) for info in merged_info}
+                v.findings = [f for f in v.findings if id(f) not in merged_finding_ids]
+                if len(v.findings) < old_count:
+                    logging_module.debug(
+                        "Removed %d merged findings from %s",
+                        old_count - len(v.findings),
+                        v.persona,
+                    )
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).debug("Cross-specialist dedup failed: %s", e)
+
+
     # --- Step 3: Aggregate observations with persona tracking ---
     all_observations: list[Finding] = []
     observation_sources: list[tuple[str, Finding]] = []

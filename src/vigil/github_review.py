@@ -311,6 +311,31 @@ def post_review(
     if diff:
         valid_lines = commentable_lines(diff)
 
+    # --- Step 0: Cross-round context filtering ---
+    # Filter out findings that match ones from previous review rounds
+    all_new_findings: list[Finding] = []
+    
+    # Collect all specialist and lead findings
+    for v in result.specialist_verdicts:
+        all_new_findings.extend(v.findings)
+    all_new_findings.extend(result.lead_findings)
+    
+    # Filter cross-round duplicates
+    if existing_comments and all_new_findings:
+        try:
+            from .context_manager import filter_cross_round_duplicates
+            filtered_findings = filter_cross_round_duplicates(all_new_findings, existing_comments)
+            
+            # Rebuild verdicts with filtered findings
+            removed_ids = {id(f) for f in all_new_findings} - {id(f) for f in filtered_findings}
+            if removed_ids:
+                log.info("Filtered %d cross-round duplicate finding(s)", len(removed_ids))
+                for v in result.specialist_verdicts:
+                    v.findings = [f for f in v.findings if id(f) not in removed_ids]
+                result.lead_findings = [f for f in result.lead_findings if id(f) not in removed_ids]
+        except Exception as e:
+            log.debug("Cross-round filtering failed: %s", e)
+
     # Place all findings inline where possible
     inline_comments: list[dict] = []
     body_findings: list[tuple[str | None, Finding]] = []
