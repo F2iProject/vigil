@@ -300,10 +300,12 @@ def _find_overlapping_fingerprints(
     ascending order. ``filter_cross_round_duplicates`` guarantees this by
     pre-sorting each candidate group once before invoking this function.
 
-    Time complexity: O(log N + k) where N = len(candidates) and k is the number
-    of overlapping results. ``bisect.bisect_right`` with a ``key`` function
-    (Python ≥ 3.10) locates the boundary in O(log N) with no intermediate list;
-    only the k relevant candidates are inspected afterward.
+    Time complexity: O(log N + R) where N = len(candidates) and R is the number
+    of candidates whose ``line_range[0] <= target_end`` (the scan window).
+    ``bisect.bisect_right`` with a ``key`` function (Python ≥ 3.10) locates the
+    window boundary in O(log N) with no intermediate list; only the R candidates
+    in the window are inspected afterward, with no extra list allocation.
+    R ≤ N; in the common case R ≈ k (the number of results returned).
 
     Unlocated findings (line_range = (0, 0)) match any target.
 
@@ -329,15 +331,16 @@ def _find_overlapping_fingerprints(
         candidates, target_end, key=lambda fp: fp.line_range[0]
     )  # O(log N)
 
-    # Iterate only the relevant slice [0:right_idx] — O(k)
-    # Use a seen set for O(1) deduplication
-    seen: set[int] = set()  # track by id() to avoid hashability requirements
+    # Iterate only the window [0, right_idx) by index — O(R), no list allocation.
+    # Use a seen set with id() for O(1) deduplication without requiring hashability.
+    seen: set[int] = set()
     result: list[FindingFingerprint] = []
-    for fp in candidates[:right_idx]:
+    for i in range(right_idx):
+        fp = candidates[i]
         fp_start, fp_end = fp.line_range
-        # Overlap condition: fp_end >= target_start (fp_start <= target_end already
-        # guaranteed by binary search above)
-        # Also accept unlocated findings (0, 0)
+        # Overlap condition: fp_end >= target_start (fp_start <= target_end is
+        # already guaranteed by the binary search boundary above).
+        # Also accept unlocated findings (0, 0).
         if (
             (fp.line_range == (0, 0) or fp_end >= target_start)
             and fp.message_hash == target.message_hash
