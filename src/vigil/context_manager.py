@@ -293,6 +293,7 @@ def _extract_finding_from_regex(
 def _find_overlapping_fingerprints(
     target: FindingFingerprint,
     candidates: list[FindingFingerprint],
+    message_hash_set: set[str] | None = None,
 ) -> list[FindingFingerprint]:
     """Find fingerprints with overlapping line ranges using binary search.
 
@@ -300,18 +301,30 @@ def _find_overlapping_fingerprints(
     ascending order. ``filter_cross_round_duplicates`` guarantees this by
     pre-sorting each candidate group once before invoking this function.
 
-    Time complexity: O(log N + R) where N = len(candidates) and R is the number
-    of candidates whose ``line_range[0] <= target_end`` (the scan window).
-    ``bisect.bisect_right`` with a ``key`` function (Python ≥ 3.10) locates the
-    window boundary in O(log N) with no intermediate list; only the R candidates
-    in the window are inspected afterward, with no extra list allocation.
-    R ≤ N; in the common case R ≈ k (the number of results returned).
+    Time complexity:
+    - Located targets (line_range != (0, 0)): O(log N + R) where N = len(candidates)
+      and R is the number of candidates whose ``line_range[0] <= target_end``
+      (the scan window). ``bisect.bisect_right`` with a ``key`` function
+      (Python ≥ 3.10) locates the window boundary in O(log N) with no
+      intermediate list allocation; only the R candidates in the window are
+      inspected afterward.
+    - Unlocated targets (line_range == (0, 0)): O(1) amortized if
+      ``message_hash_set`` is provided (pre-built set lookup), O(N) otherwise
+      (linear scan over candidates).
 
-    Unlocated findings (line_range = (0, 0)) match any target.
+    ``bisect.bisect_right`` requires Python >= 3.10 (key parameter added in 3.10);
+    pyproject.toml specifies python_requires >= "3.10" so this is always available.
+
+    Unlocated findings (line_range = (0, 0)) match any target with the same
+    message_hash.
 
     Args:
         target: The target fingerprint to match against.
         candidates: List of candidate fingerprints, pre-sorted by line_range[0].
+        message_hash_set: Optional pre-built set of message_hashes in the candidate
+                         group. If provided, enables O(1) lookup for unlocated targets
+                         instead of O(N) scan. Should contain only the message_hashes
+                         of candidates already filtered by (file, category).
 
     Returns:
         List of candidate fingerprints whose line ranges overlap with the target
@@ -319,14 +332,20 @@ def _find_overlapping_fingerprints(
     """
     if target.line_range == (0, 0):
         # Unlocated target matches everything with same message hash
-        return [fp for fp in candidates if fp.message_hash == target.message_hash]
+        if message_hash_set is not None:
+            # O(1) lookup: check if message_hash is in the pre-built set
+            if target.message_hash in message_hash_set:
+                return [fp for fp in candidates if fp.message_hash == target.message_hash]
+            else:
+                return []
+        else:
+            # O(N) fallback: linear scan over candidates
+            return [fp for fp in candidates if fp.message_hash == target.message_hash]
 
     target_start, target_end = target.line_range
 
     # Binary search: find the rightmost index where line_range[0] <= target_end.
     # bisect.bisect_right with key= avoids building an intermediate list — O(log N).
-    # Requires Python >= 3.10 (key parameter added in 3.10); pyproject.toml
-    # specifies python_requires >= "3.11" so this is always available.
     right_idx = bisect.bisect_right(
         candidates, target_end, key=lambda fp: fp.line_range[0]
     )  # O(log N)
@@ -366,7 +385,9 @@ def filter_cross_round_duplicates(
     round after round.
 
     Uses fingerprint grouping by (file, category) for O(1) lookup and optional
-    spatial lookup optimization for large candidate lists.
+    spatial lookup optimization for large candidate lists. For unlocated findings
+    (line_range == (0, 0)), builds a message_hash set for O(1) lookup instead of
+    O(N) linear scan.
 
     Args:
         new_findings: Findings from the current review round
@@ -384,6 +405,7 @@ def filter_cross_round_duplicates(
     # Pre-build set of existing fingerprints for O(1) lookup
     # Group by file+category for faster initial filtering
     existing_fingerprints_by_file_cat: dict[tuple[str, str], list[FindingFingerprint]] = {}
+    message_hash_sets: dict[tuple[str, str], set[str]] = {}
     for comment in existing_comments:
         existing_finding = extract_finding_from_comment(
             comment.get("body", ""),
@@ -395,7 +417,9 @@ def filter_cross_round_duplicates(
             key = (fp.file, fp.category)
             if key not in existing_fingerprints_by_file_cat:
                 existing_fingerprints_by_file_cat[key] = []
+                message_hash_sets[key] = set()
             existing_fingerprints_by_file_cat[key].append(fp)
+            message_hash_sets[key].add(fp.message_hash)
 
     # Pre-sort each candidate list by line_range[0] for O(log N + k) spatial lookup
     for key in existing_fingerprints_by_file_cat:
@@ -414,10 +438,11 @@ def filter_cross_round_duplicates(
 
         # Check if this finding matches any existing one (cross-round match)
         candidates = existing_fingerprints_by_file_cat[key]
+        msg_hash_set = message_hash_sets[key]
 
         # Use spatial lookup if candidate list is large
         if len(candidates) > spatial_lookup_threshold:
-            overlapping = _find_overlapping_fingerprints(new_fp, candidates)
+            overlapping = _find_overlapping_fingerprints(new_fp, candidates, msg_hash_set)
             is_duplicate = len(overlapping) > 0
         else:
             # Linear scan for small lists

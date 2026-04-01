@@ -732,15 +732,17 @@ class TestSpatialLookup:
                 file="src/auth.py",
                 category="SQL Injection",
                 message_hash="target_hash",
-                line_range=(200, 210),  # Too high
+                line_range=(100, 105),  # Exact match
             ),
             FindingFingerprint(
                 file="src/auth.py",
                 category="SQL Injection",
                 message_hash="target_hash",
-                line_range=(100, 105),  # Exact match
+                line_range=(200, 210),  # Too high
             ),
         ]
+        # Sort candidates by line_range[0] as required by precondition
+        candidates.sort(key=lambda fp: fp.line_range[0])
 
         result = _find_overlapping_fingerprints(target, candidates)
         assert len(result) == 1
@@ -787,3 +789,151 @@ class TestSpatialLookup:
         assert result[0].line_range == (10, 20)
         assert result[1].line_range == (10, 25)
         assert result[2].line_range == (10, 30)
+
+    def test_unlocated_target_with_message_hash_set_optimization(self):
+        """Test that unlocated targets use message_hash_set for O(1) lookup."""
+        from vigil.context_manager import _find_overlapping_fingerprints
+
+        target = FindingFingerprint(
+            file="src/auth.py",
+            category="SQL Injection",
+            message_hash="target_hash",
+            line_range=(0, 0),  # Unlocated
+        )
+
+        candidates = [
+            FindingFingerprint(
+                file="src/auth.py",
+                category="SQL Injection",
+                message_hash="target_hash",
+                line_range=(10, 20),
+            ),
+            FindingFingerprint(
+                file="src/auth.py",
+                category="SQL Injection",
+                message_hash="different_hash",
+                line_range=(30, 40),
+            ),
+            FindingFingerprint(
+                file="src/auth.py",
+                category="SQL Injection",
+                message_hash="target_hash",
+                line_range=(50, 60),
+            ),
+        ]
+
+        # Build message_hash_set optimization
+        msg_hash_set = {fp.message_hash for fp in candidates}
+
+        # Test with optimization
+        result_optimized = _find_overlapping_fingerprints(
+            target, candidates, message_hash_set=msg_hash_set
+        )
+        assert len(result_optimized) == 2
+        assert all(fp.message_hash == "target_hash" for fp in result_optimized)
+
+        # Test without optimization (fallback to linear scan)
+        result_fallback = _find_overlapping_fingerprints(target, candidates)
+        assert len(result_fallback) == 2
+        assert result_optimized == result_fallback
+
+    def test_unlocated_target_message_hash_set_early_exit(self):
+        """Test that message_hash_set early-exits when hash not in set."""
+        from vigil.context_manager import _find_overlapping_fingerprints
+
+        target = FindingFingerprint(
+            file="src/auth.py",
+            category="SQL Injection",
+            message_hash="non_existent_hash",
+            line_range=(0, 0),  # Unlocated
+        )
+
+        candidates = [
+            FindingFingerprint(
+                file="src/auth.py",
+                category="SQL Injection",
+                message_hash="hash_a",
+                line_range=(10, 20),
+            ),
+            FindingFingerprint(
+                file="src/auth.py",
+                category="SQL Injection",
+                message_hash="hash_b",
+                line_range=(30, 40),
+            ),
+        ]
+
+        msg_hash_set = {fp.message_hash for fp in candidates}
+
+        # With optimization: should return empty list immediately
+        result = _find_overlapping_fingerprints(
+            target, candidates, message_hash_set=msg_hash_set
+        )
+        assert len(result) == 0
+
+    def test_filter_cross_round_with_unlocated_optimization(self):
+        """Test filter_cross_round_duplicates applies message_hash optimization."""
+        # Create many existing findings with unlocated ones
+        existing_comments = []
+        for i in range(15):
+            existing_comments.append({
+                "path": "src/auth.py",
+                "line": i * 10 if i % 2 == 0 else None,  # Mix of located and unlocated
+                "body": "🟠 **[HIGH]** [SQL Injection]\n\nDangerous query",
+            })
+
+        # New unlocated finding that should match an existing unlocated one
+        new_finding = Finding(
+            file="src/auth.py",
+            line=None,  # Unlocated
+            severity=Severity.high,
+            category="SQL Injection",
+            message="Dangerous query",
+        )
+
+        # Should filter using optimization (candidate list > threshold)
+        result = filter_cross_round_duplicates(
+            [new_finding],
+            existing_comments,
+            spatial_lookup_threshold=10,
+        )
+
+        assert len(result) == 0, "Unlocated finding should match via optimization"
+
+    def test_located_target_no_message_hash_set_needed(self):
+        """Test that located targets work correctly with or without message_hash_set."""
+        from vigil.context_manager import _find_overlapping_fingerprints
+
+        target = FindingFingerprint(
+            file="src/auth.py",
+            category="SQL Injection",
+            message_hash="target_hash",
+            line_range=(40, 44),  # Located
+        )
+
+        candidates = [
+            FindingFingerprint(
+                file="src/auth.py",
+                category="SQL Injection",
+                message_hash="target_hash",
+                line_range=(42, 46),  # Overlaps
+            ),
+            FindingFingerprint(
+                file="src/auth.py",
+                category="SQL Injection",
+                message_hash="target_hash",
+                line_range=(100, 110),  # No overlap
+            ),
+        ]
+
+        msg_hash_set = {fp.message_hash for fp in candidates}
+
+        # With and without message_hash_set should give same result for located targets
+        result_with = _find_overlapping_fingerprints(
+            target, candidates, message_hash_set=msg_hash_set
+        )
+        result_without = _find_overlapping_fingerprints(target, candidates)
+
+        assert result_with == result_without
+        assert len(result_with) == 1
+        assert result_with[0].line_range == (42, 46)
