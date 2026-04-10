@@ -9,8 +9,15 @@
 # The built-in GITHUB_TOKEN is used for posting reviews.
 # Since it's a bot account, it CAN approve/request_changes (not your own PR).
 #
-# Trigger: reviews on PR open/reopen/ready. Re-review via `/vigil review` comment.
-# Does NOT auto-review on every commit push.
+# Triggers:
+#   - PR opened/reopened/ready_for_review → full review
+#   - PR synchronize (new commit) → re-review, cancels any in-progress run for the same PR
+#   - `/vigil review` comment → on-demand re-review
+#
+# Runs on the F2iLLC self-hosted runner pool (ci-general). Using GitHub-hosted
+# runners on private F2iLLC repos hits the org Actions billing cap and silently
+# skips the job ("Actions budget is preventing further use"), which is why
+# reviews appear to start but never post deliverables.
 
 name: Vigil PR Review
 
@@ -25,10 +32,15 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  issues: write
 
 jobs:
   review:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, ci-general]
+    timeout-minutes: 20
+    # One review per PR: a new commit cancels any in-flight review for the same PR.
+    # Only the review job uses this group — dismiss/resolve-addressed run independently
+    # so they aren't cancelled by unrelated commits.
     concurrency:
       group: vigil-review-${{ github.event.pull_request.number || github.event.issue.number }}
       cancel-in-progress: true
@@ -55,14 +67,15 @@ jobs:
             echo "url=${{ github.event.pull_request.html_url }}" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: F2iProject/vigil@v1
+      - uses: F2iLLC/vigil@v1
         with:
           pr-url: ${{ steps.pr.outputs.url }}
           model: "gemini/gemini-2.5-flash"
           gemini-api-key: ${{ secrets.GEMINI_API_KEY }}
 
   dismiss:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, ci-general]
+    timeout-minutes: 10
     # Resolve Vigil threads when someone replies "resolved" to an inline comment
     # or posts "resolved" in the PR conversation
     if: >-
@@ -94,20 +107,21 @@ jobs:
         run: |
           echo "url=${{ github.event.pull_request.html_url || github.event.issue.pull_request.html_url }}" >> "$GITHUB_OUTPUT"
 
-      - uses: F2iProject/vigil@v1
+      - uses: F2iLLC/vigil@v1
         with:
           pr-url: ${{ steps.pr.outputs.url }}
           command: dismiss-resolved
 
   resolve-addressed:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, ci-general]
+    timeout-minutes: 10
     # Auto-resolve Vigil threads when code at commented lines changes
     if: >-
       github.event_name == 'pull_request' &&
       github.event.action == 'synchronize' &&
       github.event.pull_request.draft == false
     steps:
-      - uses: F2iProject/vigil@v1
+      - uses: F2iLLC/vigil@v1
         with:
           command: resolve-addressed
           gemini-api-key: ${{ secrets.GEMINI_API_KEY }}
