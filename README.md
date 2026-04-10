@@ -237,7 +237,7 @@ jobs:
 ### Reusable action
 
 ```yaml
-- uses: F2iProject/vigil@main
+- uses: F2iLLC/vigil@v1
   with:
     model: "gemini/gemini-2.5-flash"
     profile: "default"
