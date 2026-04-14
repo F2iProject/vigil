@@ -11,6 +11,12 @@
 #
 # Trigger: reviews on PR open/reopen/ready. Re-review via `/vigil review` comment.
 # Does NOT auto-review on every commit push.
+#
+# Skip Vigil (e.g. when out of API credits or hitting rate limits):
+#   1. Global kill switch: set repo/org variable SKIP_VIGIL=true
+#      (Settings → Secrets and variables → Actions → Variables)
+#   2. Per-PR label: add the `skip-vigil` label to the PR
+#   3. Per-PR title: include `[skip vigil]` in the PR title
 
 name: Vigil PR Review
 
@@ -34,15 +40,21 @@ jobs:
       cancel-in-progress: true
     # PR events: skip drafts and bot PRs
     # Comment events: must be on a PR and contain /vigil review
+    # Skip entirely if SKIP_VIGIL var set, `skip-vigil` label applied, or `[skip vigil]` in PR title
     if: >-
+      vars.SKIP_VIGIL != 'true' &&
+      !contains(github.event.pull_request.labels.*.name, 'skip-vigil') &&
+      !contains(github.event.pull_request.title, '[skip vigil]') &&
       (
-        github.event_name == 'pull_request' &&
-        github.event.pull_request.draft == false &&
-        github.actor != 'dependabot[bot]'
-      ) || (
-        github.event_name == 'issue_comment' &&
-        github.event.issue.pull_request &&
-        contains(github.event.comment.body, '/vigil review')
+        (
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.draft == false &&
+          github.actor != 'dependabot[bot]'
+        ) || (
+          github.event_name == 'issue_comment' &&
+          github.event.issue.pull_request &&
+          contains(github.event.comment.body, '/vigil review')
+        )
       )
     steps:
       - name: Determine PR URL
@@ -102,7 +114,11 @@ jobs:
   resolve-addressed:
     runs-on: ubuntu-latest
     # Auto-resolve Vigil threads when code at commented lines changes
+    # Skipped when Vigil is disabled (see skip options at top of file)
     if: >-
+      vars.SKIP_VIGIL != 'true' &&
+      !contains(github.event.pull_request.labels.*.name, 'skip-vigil') &&
+      !contains(github.event.pull_request.title, '[skip vigil]') &&
       github.event_name == 'pull_request' &&
       github.event.action == 'synchronize' &&
       github.event.pull_request.draft == false
