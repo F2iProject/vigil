@@ -31,10 +31,15 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  issues: write
 
 jobs:
   review:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, ci-general]
+    timeout-minutes: 20
+    # One review per PR: a new commit cancels any in-flight review for the same PR.
+    # Only the review job uses this group — dismiss/resolve-addressed run independently
+    # so they aren't cancelled by unrelated commits.
     concurrency:
       group: vigil-review-${{ github.event.pull_request.number || github.event.issue.number }}
       cancel-in-progress: true
@@ -74,6 +79,7 @@ jobs:
           gemini-api-key: ${{ secrets.GEMINI_API_KEY }}
 
   dismiss:
+    runs-on: [self-hosted, linux, x64, ci-general]
     timeout-minutes: 10
     # Resolve Vigil threads when someone replies "resolved" to an inline comment
     # or posts "resolved" in the PR conversation
@@ -106,13 +112,14 @@ jobs:
         run: |
           echo "url=${{ github.event.pull_request.html_url || github.event.issue.pull_request.html_url }}" >> "$GITHUB_OUTPUT"
 
-      - uses: F2iProject/vigil@v1
       - uses: F2iLLC/vigil@v1
         with:
           pr-url: ${{ steps.pr.outputs.url }}
           command: dismiss-resolved
 
   resolve-addressed:
+    runs-on: [self-hosted, linux, x64, ci-general]
+    timeout-minutes: 10
     # Auto-resolve Vigil threads when code at commented lines changes
     # Skipped when Vigil is disabled (see skip options at top of file)
     if: >-
@@ -123,6 +130,7 @@ jobs:
       github.event.action == 'synchronize' &&
       github.event.pull_request.draft == false
     steps:
+      - uses: F2iLLC/vigil@v1
         with:
           command: resolve-addressed
           gemini-api-key: ${{ secrets.GEMINI_API_KEY }}
