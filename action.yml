@@ -44,14 +44,48 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - name: Set up Python
+    # Resolve a usable Python 3.10+ interpreter. Prefer the system python3 on
+    # self-hosted runners (Hetzner ci-general boxes ship with Python 3.12 and
+    # the venv module), and fall back to actions/setup-python on GitHub-hosted
+    # runners where the toolcache is reliable.
+    - name: Detect Python
+      id: py
+      shell: bash
+      run: |
+        if command -v python3 >/dev/null 2>&1; then
+          PY_VERSION="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+          if python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'; then
+            echo "Found system python3 $PY_VERSION — skipping setup-python"
+            echo "python=$(command -v python3)" >> "$GITHUB_OUTPUT"
+            echo "needs_setup=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+        fi
+        echo "No suitable system python3 — will run actions/setup-python"
+        echo "needs_setup=true" >> "$GITHUB_OUTPUT"
+
+    - name: Set up Python (fallback)
+      if: steps.py.outputs.needs_setup == 'true'
       uses: actions/setup-python@v5
       with:
         python-version: "3.12"
 
-    - name: Install Vigil
+    - name: Install Vigil into a venv
+      id: install
       shell: bash
-      run: pip install "${{ github.action_path }}"
+      run: |
+        set -euo pipefail
+        if [ "${{ steps.py.outputs.needs_setup }}" = "true" ]; then
+          PYTHON_BIN="$(command -v python)"
+        else
+          PYTHON_BIN="${{ steps.py.outputs.python }}"
+        fi
+        VENV_DIR="${RUNNER_TEMP:-/tmp}/vigil-venv-${GITHUB_RUN_ID:-local}"
+        rm -rf "$VENV_DIR"
+        "$PYTHON_BIN" -m venv "$VENV_DIR"
+        "$VENV_DIR/bin/pip" install --upgrade pip
+        "$VENV_DIR/bin/pip" install "${{ github.action_path }}"
+        echo "vigil=$VENV_DIR/bin/vigil" >> "$GITHUB_OUTPUT"
 
     - name: Run Vigil
       shell: bash
@@ -61,6 +95,8 @@ runs:
         OPENAI_API_KEY: ${{ inputs.openai-api-key }}
         ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
       run: |
+        set -euo pipefail
+        VIGIL="${{ steps.install.outputs.vigil }}"
         PR_URL="${{ inputs.pr-url }}"
         if [ -z "$PR_URL" ]; then
           PR_URL="${{ github.event.pull_request.html_url }}"
@@ -69,9 +105,9 @@ runs:
         COMMAND="${{ inputs.command }}"
 
         if [ "$COMMAND" = "dismiss-resolved" ]; then
-          vigil dismiss-resolved "$PR_URL"
+          "$VIGIL" dismiss-resolved "$PR_URL"
         elif [ "$COMMAND" = "resolve-addressed" ]; then
-          vigil resolve-addressed "$PR_URL"
+          "$VIGIL" resolve-addressed "$PR_URL"
         else
           ARGS=(
             "$PR_URL"
@@ -82,5 +118,5 @@ runs:
           if [ -n "${{ inputs.lead-model }}" ]; then
             ARGS+=(--lead-model "${{ inputs.lead-model }}")
           fi
-          vigil review "${ARGS[@]}"
+          "$VIGIL" review "${ARGS[@]}"
         fi

@@ -67,14 +67,14 @@ jobs:
             echo "url=${{ github.event.pull_request.html_url }}" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: F2iProject/vigil@v1
+      - uses: F2iLLC/vigil@v1
         with:
           pr-url: ${{ steps.pr.outputs.url }}
           model: "gemini/gemini-2.5-flash"
           gemini-api-key: ${{ secrets.GEMINI_API_KEY }}
 
   dismiss:
-    runs-on: ubuntu-latest
+    timeout-minutes: 10
     # Resolve Vigil threads when someone replies "resolved" to an inline comment
     # or posts "resolved" in the PR conversation
     if: >-
@@ -107,12 +107,12 @@ jobs:
           echo "url=${{ github.event.pull_request.html_url || github.event.issue.pull_request.html_url }}" >> "$GITHUB_OUTPUT"
 
       - uses: F2iProject/vigil@v1
+      - uses: F2iLLC/vigil@v1
         with:
           pr-url: ${{ steps.pr.outputs.url }}
           command: dismiss-resolved
 
   resolve-addressed:
-    runs-on: ubuntu-latest
     # Auto-resolve Vigil threads when code at commented lines changes
     # Skipped when Vigil is disabled (see skip options at top of file)
     if: >-
@@ -123,7 +123,6 @@ jobs:
       github.event.action == 'synchronize' &&
       github.event.pull_request.draft == false
     steps:
-      - uses: F2iProject/vigil@v1
         with:
           command: resolve-addressed
           gemini-api-key: ${{ secrets.GEMINI_API_KEY }}
