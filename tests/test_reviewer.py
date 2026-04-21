@@ -232,3 +232,98 @@ class TestDecisionFiltering:
 
         # filter_known_findings should have been called
         assert mock_filter.call_count >= 1
+
+
+# ---------- Transient specialist error handling ----------
+
+class TestTransientSpecialistErrors:
+
+    def _make_profile(self):
+        persona = Persona(name="Architecture", focus="Design", system_prompt="You are an architect.")
+        return ReviewProfile(name="test", specialists=[persona], lead_prompt="You are the lead.")
+
+    def _mock_lead_response(self, decision="APPROVE"):
+        resp = {"decision": decision, "summary": "Looks good", "findings": []}
+        mock_resp = MagicMock()
+        mock_resp.choices = [MagicMock(message=MagicMock(content=json.dumps(resp)))]
+        return mock_resp
+
+    def _pr_context(self):
+        return {
+            "title": "Test PR", "author": "user", "head": "feature",
+            "base": "main", "additions": 3, "deletions": 1,
+            "changed_files": 1, "body": "",
+        }
+
+    @patch("vigil.reviewer.send_alerts_for_verdicts")
+    @patch("vigil.reviewer._call_llm_with_retry")
+    def test_503_produces_observation_not_finding(self, mock_llm, mock_alerts):
+        """A 503 from a specialist should produce a non-blocking observation, not a finding."""
+        mock_alerts.return_value = 0
+        lead_json = json.dumps({"decision": "APPROVE", "summary": "Looks good", "findings": []})
+        lead_resp = MagicMock()
+        lead_resp.choices = [MagicMock(message=MagicMock(content=lead_json))]
+        mock_llm.side_effect = [Exception("503 Service Unavailable"), lead_resp]
+
+        profile = self._make_profile()
+        result = review_diff("diff --git a/a.py b/a.py\n", self._pr_context(), profile)
+
+        specialist = result.specialist_verdicts[0]
+        assert specialist.decision == "APPROVE"
+        assert len(specialist.findings) == 0
+        assert len(specialist.observations) == 1
+        assert "unavailable" in specialist.observations[0].message.lower()
+        assert specialist.observations[0].category == "reviewer_unavailable"
+        assert specialist.observations[0].severity == Severity.low
+
+    @patch("vigil.reviewer.send_alerts_for_verdicts")
+    @patch("vigil.reviewer._call_llm_with_retry")
+    def test_503_does_not_block_overall_review(self, mock_llm, mock_alerts):
+        """A 503 specialist error should not cause the overall review to REQUEST_CHANGES."""
+        mock_alerts.return_value = 0
+        lead_json = json.dumps({"decision": "APPROVE", "summary": "Looks good", "findings": []})
+        lead_resp = MagicMock()
+        lead_resp.choices = [MagicMock(message=MagicMock(content=lead_json))]
+        mock_llm.side_effect = [Exception("GeminiException 503 UNAVAILABLE"), lead_resp]
+
+        profile = self._make_profile()
+        result = review_diff("diff --git a/a.py b/a.py\n", self._pr_context(), profile)
+
+        assert result.decision == "APPROVE"
+        assert len(result.lead_findings) == 0
+
+    @patch("vigil.reviewer.send_alerts_for_verdicts")
+    @patch("vigil.reviewer._call_llm_with_retry")
+    def test_timeout_produces_observation_not_finding(self, mock_llm, mock_alerts):
+        """A timeout from a specialist should produce a non-blocking observation."""
+        mock_alerts.return_value = 0
+        lead_json = json.dumps({"decision": "APPROVE", "summary": "Looks good", "findings": []})
+        lead_resp = MagicMock()
+        lead_resp.choices = [MagicMock(message=MagicMock(content=lead_json))]
+        mock_llm.side_effect = [Exception("Request timed out after 30s"), lead_resp]
+
+        profile = self._make_profile()
+        result = review_diff("diff --git a/a.py b/a.py\n", self._pr_context(), profile)
+
+        specialist = result.specialist_verdicts[0]
+        assert specialist.decision == "APPROVE"
+        assert len(specialist.findings) == 0
+        assert specialist.observations[0].category == "reviewer_unavailable"
+
+    @patch("vigil.reviewer.send_alerts_for_verdicts")
+    @patch("vigil.reviewer._call_llm_with_retry")
+    def test_non_transient_error_still_produces_error_finding(self, mock_llm, mock_alerts):
+        """A non-transient error (e.g. bad model config) should still produce an ERROR verdict."""
+        mock_alerts.return_value = 0
+        lead_json = json.dumps({"decision": "APPROVE", "summary": "Looks good", "findings": []})
+        lead_resp = MagicMock()
+        lead_resp.choices = [MagicMock(message=MagicMock(content=lead_json))]
+        mock_llm.side_effect = [Exception("Invalid API key: authentication failed"), lead_resp]
+
+        profile = self._make_profile()
+        result = review_diff("diff --git a/a.py b/a.py\n", self._pr_context(), profile)
+
+        specialist = result.specialist_verdicts[0]
+        assert specialist.decision == "ERROR"
+        assert len(specialist.findings) == 1
+        assert specialist.findings[0].category == "reviewer_error"
